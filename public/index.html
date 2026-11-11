@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mototaxi Libre</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#f2b300">
+<style>
+:root{--bg:#f3f1ea;--card:#fff;--ink:#1b2a33;--mut:#5d6b73;--acc:#f2b300;--line:#d9d5c8}
+@media (prefers-color-scheme:dark){:root{--bg:#10181d;--card:#19252c;--ink:#eef1ee;--mut:#9fb0b8;--line:#2b3b44}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.45 "Trebuchet MS",Verdana,sans-serif;display:flex;flex-direction:column}
+#map{flex:1;min-height:200px}
+#panel{background:var(--card);border-top:1px solid var(--line);padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px));max-height:55%;overflow:auto}
+h1{font-size:1.3rem;margin:0 0 4px}.mut{color:var(--mut);margin:2px 0 8px}
+input{width:100%;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:inherit;margin:4px 0}
+button{width:100%;padding:13px;margin-top:8px;border:0;border-radius:12px;background:var(--acc);color:#1b2a33;font:inherit;font-weight:700}
+button.alt{background:none;border:1px solid var(--line);color:var(--ink)}
+button:disabled{opacity:.45}
+.req{border:1px solid var(--line);border-radius:12px;padding:10px;margin-top:8px}
+a.nav{display:block;text-align:center;margin-top:8px;color:var(--ink)}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel"></div>
+<script src="/config.js"></script>
+<script>
+var $=function(i){return document.getElementById(i)};
+var P=$("panel"),map,ws,role=null,ride=null;
+var NAMES=["","Buscando mototaxista","Tu mototaxista va en camino","Tu mototaxi llegó","En viaje","Terminado"];
+var mk={from:null,to:null,moto:null,me:null,reqs:{}};
+var sel="from",gps=null,watch=null;
+
+function pin(pos,label,color){return new google.maps.Marker({map:map,position:pos,label:label,
+  icon:color?{path:google.maps.SymbolPath.CIRCLE,scale:11,fillColor:color,fillOpacity:1,strokeColor:"#fff",strokeWeight:2}:undefined})}
+function setPin(k,pos,label,color){if(mk[k])mk[k].setMap(null);mk[k]=pos?pin(pos,label,color):null}
+
+function connect(then){
+  var proto=location.protocol==="https:"?"wss://":"ws://";
+  ws=new WebSocket(proto+location.host);
+  ws.onopen=then;
+  ws.onmessage=function(e){onMsg(JSON.parse(e.data))};
+  ws.onclose=function(){P.insertAdjacentHTML("afterbegin",'<p class="mut">Conexión perdida. Recarga la página.</p>')};
+}
+function tx(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
+
+window.initMap=function(){
+  map=new google.maps.Map($("map"),{center:{lat:4.711,lng:-74.072},zoom:14,disableDefaultUI:true,zoomControl:true,clickableIcons:false});
+  start();
+};
+if(!window.MAPS_KEY){P.innerHTML="<h1>Falta la clave de Google Maps</h1><p class='mut'>Arranca el servidor con la variable GOOGLE_MAPS_KEY.</p>"}
+else{var s=document.createElement("script");s.src="https://maps.googleapis.com/maps/api/js?key="+encodeURIComponent(window.MAPS_KEY)+"&callback=initMap";s.async=true;document.head.appendChild(s)}
+
+function start(){
+  P.innerHTML="<h1>Mototaxi Libre</h1><p class='mut'>Viajes sin pagos en la app. ¿Cómo vas a usarla?</p>"+
+  "<button id='bp'>Soy pasajero</button><button id='bd' class='alt'>Soy mototaxista</button>";
+  $("bp").onclick=function(){gate("passenger")};$("bd").onclick=function(){gate("driver")};
+  navigator.geolocation&&navigator.geolocation.getCurrentPosition(function(p){
+    gps={lat:p.coords.latitude,lng:p.coords.longitude};map.setCenter(gps);
+    setPin("me",gps,null,"#2b7de9");
+  });
+}
+
+/* ---------- ACCESO PRIVADO ---------- */
+var wantRole=null;
+function gate(r){
+  wantRole=r;var saved="";try{saved=localStorage.getItem("code_"+r)||""}catch(e){}
+  P.innerHTML="<h1>Acceso privado</h1><p class='mut'>Escribe el código que te dieron.</p><input id='cd' placeholder='Código' autocomplete='off' value='"+esc(saved)+"'><button id='ok'>Entrar</button>";
+  $("ok").onclick=function(){
+    var c=$("cd").value.trim();if(!c)return;
+    window._code=c;connect(function(){tx({type:"auth",role:r,code:c})});
+  };
+}
+
+/* ---------- PASAJERO ---------- */
+function passenger(){
+  role="p";sel="from";
+  P.innerHTML="<h1>Pide tu mototaxi</h1><p class='mut' id='hint'>Toca el mapa para marcar dónde te recogen.</p>"+
+  "<input id='nom' placeholder='Tu nombre' autocomplete='name'>"+
+  "<button id='use' class='alt'>Usar mi ubicación como recogida</button>"+
+  "<button id='go' disabled>Pedir mototaxi</button>";
+  map.addListener("click",function(e){
+    if(role!=="p"||ride)return;
+    var pos={lat:e.latLng.lat(),lng:e.latLng.lng()};
+    if(sel==="from"){setPin("from",pos,"A");sel="to";$("hint").textContent="Ahora toca el mapa para marcar tu destino."}
+    else{setPin("to",pos,"B");$("hint").textContent="Listo. Puedes mover A o B tocando de nuevo el mapa tras elegir.";}
+    $("go").disabled=!(mk.from&&mk.to);
+  });
+  $("use").onclick=function(){if(!gps)return alert("Activa el permiso de ubicación.");
+    setPin("from",gps,"A");sel="to";$("hint").textContent="Ahora toca el mapa para marcar tu destino.";$("go").disabled=!(mk.from&&mk.to)};
+  $("go").onclick=function(){
+    var n=$("nom").value.trim();if(!n)return alert("Escribe tu nombre.");
+    var f=mk.from.getPosition(),t=mk.to.getPosition();
+    tx({type:"request",name:n,from:{lat:f.lat(),lng:f.lng()},to:{lat:t.lat(),lng:t.lng()}});
+  };
+}
+function paintPassenger(){
+  var h="<h1>"+NAMES[ride.stage]+"</h1>";
+  if(ride.driver)h+="<p class='mut'>"+esc(ride.driver)+(ride.plate?" · placa "+esc(ride.plate):"")+"</p>";
+  if(ride.stage===2)h+="<p class='mut'>Mira el punto amarillo: es tu mototaxi en tiempo real.</p>";
+  if(ride.stage<4)h+="<button id='cx' class='alt'>Cancelar pedido</button>";
+  if(ride.stage===5)h+="<button id='again'>Pedir otro viaje</button>";
+  P.innerHTML=h;
+  if($("cx"))$("cx").onclick=function(){tx({type:"cancel"});location.reload()};
+  if($("again"))$("again").onclick=function(){location.reload()};
+}
+
+/* ---------- MOTOTAXISTA ---------- */
+function driver(){
+  role="d";
+  P.innerHTML="<h1>Mototaxista</h1><input id='dn' placeholder='Tu nombre'><input id='pl' placeholder='Placa de la moto'>"+
+  "<button id='on'>Conectarme</button>";
+  $("on").onclick=function(){
+    var n=$("dn").value.trim();if(!n)return alert("Escribe tu nombre.");
+    if(!navigator.geolocation)return alert("Este dispositivo no tiene GPS.");
+    watch=navigator.geolocation.watchPosition(function(p){
+      gps={lat:p.coords.latitude,lng:p.coords.longitude};setPin("me",gps,null,"#2b7de9");
+      tx({type:"loc",lat:gps.lat,lng:gps.lng});
+    },function(){alert("Activa el permiso de ubicación.")},{enableHighAccuracy:true,maximumAge:2000});
+    try{navigator.wakeLock&&navigator.wakeLock.request("screen")}catch(e){}
+    tx({type:"driver_hello",name:n,plate:$("pl").value.trim()});paintDriver();
+  };
+}
+var list={};
+function paintDriver(){
+  if(ride&&ride.stage<5){
+    var go={2:"Ya llegué",3:"Iniciar viaje",4:"Terminar viaje"}[ride.stage];
+    var dest=ride.stage<=2?ride.from:ride.to;
+    P.innerHTML="<h1>"+esc(ride.name)+"</h1><p class='mut'>"+NAMES[ride.stage]+"</p>"+
+    "<a class='nav' target='_blank' rel='noopener' href='https://www.google.com/maps/dir/?api=1&destination="+dest.lat+","+dest.lng+"'>Abrir ruta en Google Maps</a>"+
+    "<button id='nx'>"+go+"</button>";
+    $("nx").onclick=function(){tx({type:"advance"})};
+    return;
+  }
+  var h="<h1>Pedidos cercanos</h1>",ids=Object.keys(list);
+  if(!ids.length)h+="<p class='mut'>Sin pedidos por ahora. Se avisará aquí al instante.</p>";
+  ids.forEach(function(id){var r=list[id];h+="<div class='req'><b>"+esc(r.name)+"</b><button data-id='"+id+"'>Aceptar pedido</button></div>"});
+  P.innerHTML=h;
+  var b=P.querySelectorAll("button[data-id]");
+  for(var i=0;i<b.length;i++)b[i].onclick=function(){tx({type:"accept",id:+this.dataset.id})};
+  Object.keys(mk.reqs).forEach(function(id){if(!list[id]){mk.reqs[id].setMap(null);delete mk.reqs[id]}});
+}
+
+/* ---------- MENSAJES ---------- */
+function onMsg(m){
+  if(m.type==="auth_fail"){alert("Código incorrecto.");location.reload();return}
+  if(m.type==="auth_ok"){try{localStorage.setItem("code_"+wantRole,window._code)}catch(e){}
+    if(wantRole==="passenger")passenger();else driver();return}
+  if(m.type==="pending"){list={};m.rides.forEach(addReq);paintDriver()}
+  if(m.type==="new"){addReq(m.ride);paintDriver()}
+  if(m.type==="gone"){delete list[m.id];paintDriver()}
+  if(m.type==="ride"){
+    ride=m.ride;
+    if(role==="p"){
+      if(m.ride.loc)moveMoto(m.ride.loc);
+      paintPassenger();
+    }else{
+      Object.keys(list).forEach(function(k){delete list[k]});
+      setPin("from",ride.from,"A");setPin("to",ride.to,"B");
+      var b=new google.maps.LatLngBounds();b.extend(ride.from);b.extend(ride.to);map.fitBounds(b,60);
+      paintDriver();
+    }
+  }
+  if(m.type==="loc"&&role==="p")moveMoto(m.loc);
+  if(m.type==="closed"){alert("El viaje fue "+m.why+".");location.reload()}
+}
+function addReq(r){
+  list[r.id]=r;
+  if(!mk.reqs[r.id])mk.reqs[r.id]=pin(r.from,"A");
+}
+function moveMoto(loc){
+  if(!mk.moto)mk.moto=pin(loc,"🛵","#f2b300");else mk.moto.setPosition(loc);
+  var b=new google.maps.LatLngBounds();b.extend(loc);if(mk.from)b.extend(mk.from.getPosition());map.fitBounds(b,70);
+}
+function esc(t){var d=document.createElement("div");d.textContent=t==null?"":t;return d.innerHTML}
+if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js").catch(function(){});
+</script>
+</body>
+</html>
